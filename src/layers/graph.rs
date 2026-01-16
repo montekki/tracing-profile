@@ -71,14 +71,35 @@ impl Default for Config {
     }
 }
 
-#[derive(Default)]
 struct State {
-    current_span: Option<span::Id>,
+    current_span_per_thread: HashMap<ThreadId, Option<span::Id>>,
     unfinished_spans: LinearMap<u64, GraphNode>,
     zero_level_events: EventCounts,
 }
 
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            current_span_per_thread: HashMap::new(),
+            unfinished_spans: LinearMap::new(),
+            zero_level_events: EventCounts::default(),
+        }
+    }
+}
+
 impl State {
+    fn current_span(&self) -> Option<span::Id> {
+        self.current_span_per_thread
+            .get(&std::thread::current().id())
+            .cloned()
+            .flatten()
+    }
+
+    fn set_current_span(&mut self, span_id: Option<span::Id>) {
+        self.current_span_per_thread
+            .insert(std::thread::current().id(), span_id);
+    }
+
     fn print_zero_level_events(&mut self) {
         if !self.zero_level_events.is_empty() {
             println!("> {}\n", self.zero_level_events.format().join("\n> "));
@@ -104,8 +125,8 @@ impl Drop for Guard {
 
 /// GraphLayer (internally called layer::graph)
 /// This Layer prints a call graph to stdout. Please note that this layer both prints data about spans and events.
-/// Spans from the threads other than the main thread are not printed. Events from the main thread are attached to the latest main thread span.
-/// Depending on the `Config::accumulate_events` setting, the layer will either print the events of each span or accumulate the events of the children into the parent.
+/// Spans from all threads are captured when using explicit `parent:` for cross-thread span hierarchy.
+/// Events are attached to the current span of the thread they occur on.
 ///
 /// example output:
 /// ```bash
@@ -167,10 +188,6 @@ where
         id: &span::Id,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        if !self.is_main_thread() {
-            return;
-        }
-
         let mut graph_node = GraphNode {
             call_count: 1,
             ..Default::default()
@@ -191,10 +208,6 @@ where
         values: &span::Record<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        if !self.is_main_thread() {
-            return;
-        }
-
         let Ok(mut state) = self.state.lock() else {
             return err_msg!("failed to get mutex");
         };
@@ -206,15 +219,11 @@ where
     }
 
     fn on_enter(&self, id: &span::Id, _ctx: tracing_subscriber::layer::Context<'_, S>) {
-        if !self.is_main_thread() {
-            return;
-        }
-
         let Ok(mut state) = self.state.lock() else {
             return err_msg!("failed to get mutex");
         };
 
-        state.current_span = Some(id.clone());
+        state.set_current_span(Some(id.clone()));
         if let Some(graph_node) = state.unfinished_spans.get_mut(&id.into_u64()) {
             graph_node.started = Some(Instant::now());
         }
@@ -261,7 +270,7 @@ where
             }
         };
 
-        state.current_span = parent;
+        state.set_current_span(parent);
     }
 
     fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
@@ -273,15 +282,11 @@ where
             return err_msg!("failed to get mutex");
         };
 
-        let span_id = if self.is_main_thread() {
-            event
-                .parent()
-                .cloned()
-                .or_else(|| ctx.current_span().id().cloned())
-        } else {
-            // try to attach the event to the latest main thread span
-            state.current_span.clone()
-        };
+        let span_id = event
+            .parent()
+            .cloned()
+            .or_else(|| ctx.current_span().id().cloned())
+            .or_else(|| state.current_span());
 
         match span_id {
             Some(span_id) => {
