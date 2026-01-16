@@ -256,11 +256,12 @@ where
 
         let parent = match span.parent() {
             Some(p) => {
-                let Some(parent_node) = state.unfinished_spans.get_mut(&p.id().into_u64()) else {
-                    return err_msg!("failed to get parent node");
-                };
+                if let Some(parent_node) = state.unfinished_spans.get_mut(&p.id().into_u64()) {
+                    parent_node.child_nodes.push(node);
+                } else {
+                    node.print(&self.config);
+                }
 
-                parent_node.child_nodes.push(node);
                 Some(p.id().clone())
             }
             None => {
