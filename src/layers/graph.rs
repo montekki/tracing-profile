@@ -170,10 +170,6 @@ impl Layer {
 
         (layer, guard)
     }
-
-    fn is_main_thread(&self) -> bool {
-        self.main_thread == std::thread::current().id()
-    }
 }
 
 impl<S> tracing_subscriber::Layer<S> for Layer
@@ -232,10 +228,6 @@ where
     }
 
     fn on_exit(&self, id: &span::Id, ctx: tracing_subscriber::layer::Context<'_, S>) {
-        if !self.is_main_thread() {
-            return;
-        }
-
         let Some(span) = ctx.span(id) else {
             return err_msg!("failed to get span on_exit");
         };
